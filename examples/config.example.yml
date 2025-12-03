@@ -1,0 +1,6 @@
+target: .
+baseline: baseline_from_yaml.json
+log: log_from_yaml.jsonl
+exclude:
+  - "__pycache__"
+  - "venv"

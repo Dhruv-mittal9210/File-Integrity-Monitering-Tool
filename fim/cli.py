@@ -1,118 +1,146 @@
+#!/usr/bin/env python3
+"""
+CLI entrypoint for the FIM project.
+
+Usage examples:
+  python -m fim init . --config examples/config.example.yml
+  python -m fim check . --exclude __pycache__ --log mylog.jsonl
+"""
+
 import argparse
 from pathlib import Path
+from typing import Any
 
 from .scanner import scan_directory
-from .storage.json_store import save_json
+from .storage.json_store import save_json, load_json
 from .schema import build_baseline_structure
-from .config import DEFAULT_BASELINE_PATH
-from .utils import resolve_path
-from .storage.json_store import load_json
 from .comparator import compare_baseline
 from .logger import append_log
+from .settings import build_settings
 
 
+def init_command(args: Any) -> None:
+    """
+    Create a baseline based on settings (defaults <- config <- CLI).
+    """
+    settings = build_settings(args, args.config)
 
-def init_command(target: str, baseline_path: str = None):
-    target_path = resolve_path(target)
+    target = settings["target"]
+    baseline_path = Path(settings["baseline"])
+    exclude = settings.get("exclude", [])
 
-    if baseline_path:
-        baseline_file = resolve_path(baseline_path)
-    else:
-        baseline_file = DEFAULT_BASELINE_PATH
-
-    print(f"Scanning directory: {target_path}")
-
-    files = scan_directory(target_path)
+    print(f"Scanning directory: {target}")
+    files = scan_directory(Path(target), exclude=exclude)
 
     print(f"Found {len(files)} files. Building baseline...")
+    baseline = build_baseline_structure(str(Path(target).resolve()), files)
 
-    baseline = build_baseline_structure(str(target_path), files)
-
-    save_json(baseline_file, baseline)
-
-    print(f"Baseline saved to {baseline_file}")
+    save_json(baseline_path, baseline)
+    print(f"Baseline saved to {baseline_path}")
 
 
-def build_cli():
-    parser = argparse.ArgumentParser(prog="fim", description="File Integrity Monitor")
+def check_command(args: Any) -> None:
+    """
+    Check current directory state against baseline and log any changes.
+    """
+    settings = build_settings(args, args.config)
 
-    sub = parser.add_subparsers(dest="command", required=True)
+    target = settings["target"]
+    baseline_path = Path(settings["baseline"])
+    log_path = Path(settings["log"])
+    exclude = settings.get("exclude", [])
 
-    # init command
-    p_init = sub.add_parser("init", help="Create baseline JSON for a directory")
-    p_init.add_argument("target", help="Directory to scan")
-    p_init.add_argument("--baseline", help="Path to baseline JSON file")
-
-    # check command
-    p_check = sub.add_parser("check", help="Compare current state with baseline")
-    p_check.add_argument("target", help="Directory to scan")
-    p_check.add_argument("--baseline", help="Path to baseline")
-    p_check.add_argument("--log", help="Log file path", default="changes_log.jsonl")
-
-
-    return parser
-
-
-def main():
-    parser = build_cli()
-    args = parser.parse_args()
-
-    if args.command == "init":
-        init_command(args.target, args.baseline)
-    
-    if args.command == "check":
-        check_command(args.target, args.baseline, args.log)
-
-
-def check_command(target: str, baseline_path: str = None, log_path: str = "changes_log.jsonl"):
-    target_path = resolve_path(target)
-
-    # Baseline file
-    baseline_file = resolve_path(baseline_path) if baseline_path else DEFAULT_BASELINE_PATH
-    baseline = load_json(baseline_file)
-
+    baseline = load_json(baseline_path)
     if baseline is None:
-        print(f"ERROR: Baseline not found at: {baseline_file}")
+        print(f"ERROR: Baseline not found at: {baseline_path}")
         return
 
-    print(f"Scanning current directory state: {target_path}")
-    new_files = scan_directory(target_path)
+    print(f"Scanning current directory state: {target}")
+    new_files = scan_directory(Path(target), exclude=exclude)
 
     print("Comparing with baseline...")
+    changes = compare_baseline(baseline.get("files", {}), new_files)
 
-    changes = compare_baseline(baseline["files"], new_files)
+    created = changes.get("created", [])
+    deleted = changes.get("deleted", [])
+    modified = changes.get("modified", [])
 
-    created = changes["created"]
-    deleted = changes["deleted"]
-    modified = changes["modified"]
-
-    # Human-readable output
     if not (created or deleted or modified):
         print("No changes detected. Everything is clean.")
     else:
         print("\n=== Changes Detected ===")
         if created:
             print("\n[CREATED]")
-            for f in created:
-                print(" +", f)
+            for p in created:
+                print(" +", p)
 
         if modified:
             print("\n[MODIFIED]")
-            for f in modified:
-                print(" *", f)
+            for p in modified:
+                print(" *", p)
 
         if deleted:
             print("\n[DELETED]")
-            for f in deleted:
-                print(" -", f)
+            for p in deleted:
+                print(" -", p)
 
-    # Log entry
-    append_log(Path(log_path), {
-        "target": str(target_path),
+    # Append to JSONL log
+    append_log(log_path, {
+        "target": str(Path(target).resolve()),
         "created": created,
         "modified": modified,
         "deleted": deleted
     })
 
-    print(f"\nLogged to {log_path}") 
+    print(f"\nLogged to {log_path}")
 
+
+def build_cli() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="fim", description="File Integrity Monitor")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # init subcommand
+    p_init = sub.add_parser("init", help="Create baseline JSON for a directory")
+    p_init.add_argument("target", help="Directory to scan")
+    p_init.add_argument("--config", help="Path to YAML config file", default=None)
+    p_init.add_argument("--baseline", help="Path to baseline JSON file", default=None)
+    p_init.add_argument("--log", help="Path to JSONL log file", default=None)
+    p_init.add_argument(
+        "--exclude",
+        nargs="*",
+        action="append",
+        help="Exclude patterns (can be passed multiple times)",
+        default=None,
+    )
+
+    # check subcommand
+    p_check = sub.add_parser("check", help="Compare current state with baseline")
+    p_check.add_argument("target", help="Directory to scan")
+    p_check.add_argument("--config", help="Path to YAML config file", default=None)
+    p_check.add_argument("--baseline", help="Path to baseline JSON file", default=None)
+    p_check.add_argument("--log", help="Path to JSONL log file", default=None)
+    p_check.add_argument(
+        "--exclude",
+        nargs="*",
+        action="append",
+        help="Exclude patterns (can be passed multiple times)",
+        default=None,
+    )
+
+    return parser
+
+
+def main() -> None:
+    parser = build_cli()
+    args = parser.parse_args()
+
+    if args.command == "init":
+        init_command(args)
+    elif args.command == "check":
+        check_command(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
