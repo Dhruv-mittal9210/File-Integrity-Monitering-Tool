@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.10, 3.11, 3.12]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          set -e
+          if [ -f requirements.txt ]; then
+            python -m pip install --upgrade pip
+            python -m pip install -r requirements.txt
+          else
+            python -m pip install --upgrade pip
+            python -m pip install pytest pyyaml
+          fi
+
+      - name: Install package in editable mode (if packaging exists)
+        run: |
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then
+            python -m pip install -e .
+          fi
+
+      - name: Run tests
+        run: |
+          python -m pytest -q
