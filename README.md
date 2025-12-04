@@ -1,4 +1,1 @@
-"# File Integrity Monitor Project" 
-
-
-Testing FIM modification detection.
+# File Integrity Monitor Project 
