@@ -1,2 +1,0 @@
-{"event": "check", "target": "C:\\Users\\hardi\\File-Integrity-Monitering-Tool", "created": ["baseline_from_yaml.json"], "modified": [], "deleted": [], "timestamp": "2025-12-04T20:23:04.737757Z"}
-{"event": "baseline_update", "target": "C:\\Users\\hardi\\File-Integrity-Monitering-Tool", "backup": "baseline_from_yaml.json.bak.20251204T202315Z", "created": ["baseline_from_yaml.json", "log_from_yaml.jsonl"], "modified": [], "deleted": [], "timestamp": "2025-12-04T20:23:15.900390Z"}

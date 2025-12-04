@@ -1,10 +1,9 @@
 import hashlib
 from pathlib import Path
-from typing import Optional
 
 CHUNK_SIZE = 8192  # 8 KB chunks (safe for large files)
 
-def hash_file(path: Path) -> Optional[str]:
+def hash_file(path: Path) -> str | None:
     """
     Returns SHA-256 hash of the file at 'path'.
     Returns None if file can't be read (permissions, etc.).
