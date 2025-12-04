@@ -2,7 +2,7 @@
 
 import argparse
 from pathlib import Path
-from typing import Any
+from typing import Any, List
 import shutil
 from datetime import datetime
 
@@ -14,19 +14,45 @@ from .logger import append_log
 from .settings import build_settings
 
 
+def _flatten_exclude(exclude_arg: Any) -> List[str]:
+    """
+    Normalize argparse output for --exclude to a flat list of strings.
+    Accepts None, list, or list-of-lists (from previous argparse patterns).
+    """
+    if exclude_arg is None:
+        return []
+    if isinstance(exclude_arg, str):
+        return [exclude_arg]
+    flat: List[str] = []
+    for item in exclude_arg:
+        if item is None:
+            continue
+        if isinstance(item, (list, tuple)):
+            for sub in item:
+                if sub is not None:
+                    flat.append(str(sub))
+        else:
+            flat.append(str(item))
+    return flat
+
+
 # ===========================
 # INIT COMMAND
 # ===========================
 
 def init_command(args: Any) -> None:
+    # normalize exclude arg shape before passing to settings
+    args.exclude = _flatten_exclude(args.exclude)
+
     settings = build_settings(args, args.config)
 
     target = settings["target"]
     baseline_path = Path(settings["baseline"])
     exclude = settings.get("exclude", [])
+    follow_symlinks = settings.get("follow_symlinks", False)
 
     print(f"Scanning directory: {target}")
-    files = scan_directory(Path(target), exclude=exclude)
+    files = scan_directory(Path(target), exclude=exclude, follow_symlinks=follow_symlinks)
 
     print(f"Found {len(files)} files. Building baseline...")
     baseline = build_baseline_structure(str(Path(target).resolve()), files)
@@ -34,18 +60,28 @@ def init_command(args: Any) -> None:
     save_json(baseline_path, baseline)
     print(f"Baseline saved to {baseline_path}")
 
+    # log init event
+    append_log(Path(settings["log"]), {
+        "event": "init",
+        "target": str(Path(target).resolve()),
+        "baseline": str(baseline_path),
+        "files_count": len(files)
+    })
+
 
 # ===========================
 # CHECK COMMAND
 # ===========================
 
 def check_command(args: Any) -> None:
+    args.exclude = _flatten_exclude(args.exclude)
     settings = build_settings(args, args.config)
 
     target = settings["target"]
     baseline_path = Path(settings["baseline"])
     log_path = Path(settings["log"])
     exclude = settings.get("exclude", [])
+    follow_symlinks = settings.get("follow_symlinks", False)
 
     baseline = load_json(baseline_path)
     if baseline is None:
@@ -53,7 +89,7 @@ def check_command(args: Any) -> None:
         return
 
     print(f"Scanning current directory state: {target}")
-    new_files = scan_directory(Path(target), exclude=exclude)
+    new_files = scan_directory(Path(target), exclude=exclude, follow_symlinks=follow_symlinks)
 
     print("Comparing with baseline...")
     changes = compare_baseline(baseline.get("files", {}), new_files)
@@ -98,12 +134,14 @@ def check_command(args: Any) -> None:
 # ===========================
 
 def update_command(args: Any) -> None:
+    args.exclude = _flatten_exclude(args.exclude)
     settings = build_settings(args, args.config)
 
     target = settings["target"]
     baseline_path = Path(settings["baseline"])
     log_path = Path(settings["log"])
     exclude = settings.get("exclude", [])
+    follow_symlinks = settings.get("follow_symlinks", False)
 
     old_baseline = load_json(baseline_path)
     if old_baseline is None:
@@ -111,7 +149,7 @@ def update_command(args: Any) -> None:
         return
 
     print(f"Scanning current directory state: {target}")
-    new_files = scan_directory(Path(target), exclude=exclude)
+    new_files = scan_directory(Path(target), exclude=exclude, follow_symlinks=follow_symlinks)
 
     changes = compare_baseline(old_baseline.get("files", {}), new_files)
 
@@ -140,10 +178,13 @@ def update_command(args: Any) -> None:
         for f in deleted:
             print(" -", f)
 
-    confirm = input("\nApply these changes to baseline? (y/N): ").strip().lower()
-    if confirm not in ("y", "yes"):
-        print("Update cancelled.")
-        return
+    if not getattr(args, "yes", False):
+        confirm = input("\nApply these changes to baseline? (y/N): ").strip().lower()
+        if confirm not in ("y", "yes"):
+            print("Update cancelled.")
+            return
+    else:
+        print("Auto-confirm enabled: applying changes to baseline.")
 
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     backup = baseline_path.with_name(f"{baseline_path.name}.bak.{ts}")
@@ -186,7 +227,9 @@ def build_cli():
     p_init.add_argument("--config", help="YAML config file", default=None)
     p_init.add_argument("--baseline", help="Baseline file", default=None)
     p_init.add_argument("--log", help="Log file", default=None)
-    p_init.add_argument("--exclude", nargs="*", action="append", default=None)
+    p_init.add_argument("--exclude", nargs="*", default=[])
+    p_init.add_argument("--follow-symlinks", action="store_true", default=False,
+                        help="Follow symlinks while scanning")
 
     # CHECK
     p_check = sub.add_parser("check", help="Check integrity against baseline")
@@ -194,7 +237,9 @@ def build_cli():
     p_check.add_argument("--config", help="YAML config file", default=None)
     p_check.add_argument("--baseline", help="Baseline file", default=None)
     p_check.add_argument("--log", help="Log file", default=None)
-    p_check.add_argument("--exclude", nargs="*", action="append", default=None)
+    p_check.add_argument("--exclude", nargs="*", default=[])
+    p_check.add_argument("--follow-symlinks", action="store_true", default=False,
+                         help="Follow symlinks while scanning")
 
     # UPDATE
     p_update = sub.add_parser("update", help="Update baseline safely")
@@ -202,7 +247,11 @@ def build_cli():
     p_update.add_argument("--config", help="YAML config file", default=None)
     p_update.add_argument("--baseline", help="Baseline file", default=None)
     p_update.add_argument("--log", help="Log file", default=None)
-    p_update.add_argument("--exclude", nargs="*", action="append", default=None)
+    p_update.add_argument("--exclude", nargs="*", default=[])
+    p_update.add_argument("--follow-symlinks", action="store_true", default=False,
+                          help="Follow symlinks while scanning")
+    p_update.add_argument("-y", "--yes", action="store_true", default=False,
+                          help="Auto-confirm baseline updates (non-interactive)")
 
     return parser
 

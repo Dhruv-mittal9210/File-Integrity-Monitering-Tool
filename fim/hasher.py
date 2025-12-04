@@ -1,19 +1,22 @@
-import hashlib
 from pathlib import Path
+import hashlib
+from typing import Optional
+import logging
 
-CHUNK_SIZE = 8192  # 8 KB chunks (safe for large files)
+logger = logging.getLogger(__name__)
 
-def hash_file(path: Path) -> str | None:
+def hash_file(path: Path) -> Optional[str]:
     """
-    Returns SHA-256 hash of the file at 'path'.
-    Returns None if file can't be read (permissions, etc.).
+    Compute SHA-256 of a file. Returns hex digest string on success,
+    or None on failure (permission error, IO error, etc).
     """
     try:
-        h = hashlib.sha256()
-        with path.open("rb") as f:
-            while chunk := f.read(CHUNK_SIZE):
-                h.update(chunk)
-        return h.hexdigest()
-
-    except (PermissionError, FileNotFoundError, IsADirectoryError):
+        hasher = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception as e:
+        # Log a warning but don't raise — caller will skip the file.
+        logger.warning("Failed to hash %s: %s", path, e)
         return None
