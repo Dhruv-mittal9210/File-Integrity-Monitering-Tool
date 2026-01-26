@@ -12,6 +12,7 @@ from .schema import build_baseline_structure
 from .comparator import compare_baseline
 from .logger import append_log
 from .settings import build_settings
+from .watch import watch
 
 
 def _flatten_exclude(exclude_arg: Any) -> List[str]:
@@ -214,6 +215,32 @@ def update_command(args: Any) -> None:
 
 
 # ===========================
+# WATCH COMMAND
+# ===========================
+
+
+def watch_command(args: Any) -> None:
+    args.exclude = _flatten_exclude(args.exclude)
+    settings = build_settings(args, args.config)
+
+    target = Path(settings["target"]).resolve()
+    baseline_path = Path(settings["baseline"])
+    log_path = Path(settings["log"])
+    exclude = settings.get("exclude", [])
+
+    baseline = load_json(baseline_path)
+    if baseline is None:
+        print(f"ERROR: Baseline not found at: {baseline_path}. Run `fim init` first.")
+        return
+
+    baseline_files = baseline.get("files", {})
+    print(f"Loaded baseline from {baseline_path} with {len(baseline_files)} files.")
+    print(f"Log file: {log_path}")
+
+    watch(target, baseline_files, exclude, log_path)
+
+
+# ===========================
 # CLI PARSER
 # ===========================
 
@@ -253,6 +280,14 @@ def build_cli():
     p_update.add_argument("-y", "--yes", action="store_true", default=False,
                           help="Auto-confirm baseline updates (non-interactive)")
 
+    # WATCH
+    p_watch = sub.add_parser("watch", help="Watch target for real-time changes")
+    p_watch.add_argument("target", help="Directory to watch")
+    p_watch.add_argument("--config", help="YAML config file", default=None)
+    p_watch.add_argument("--baseline", help="Baseline file", default=None)
+    p_watch.add_argument("--log", help="Log file", default=None)
+    p_watch.add_argument("--exclude", nargs="*", default=[])
+
     return parser
 
 
@@ -269,6 +304,8 @@ def main():
         check_command(args)
     elif args.command == "update":
         update_command(args)
+    elif args.command == "watch":
+        watch_command(args)
     else:
         print("Unknown command")
 
