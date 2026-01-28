@@ -4,6 +4,7 @@ from typing import Dict, List
 from fnmatch import fnmatch
 
 from .hasher import hash_file
+from .utils import normalize_rel_path
 
 def _matches_exclude_patterns(rel_path: str, patterns: List[str]) -> bool:
     """
@@ -59,7 +60,7 @@ def scan_directory(target: Path, exclude: List[str] = None, follow_symlinks: boo
         for filename in files:
             file_path = Path(root) / filename
             try:
-                rel_path = str(file_path.relative_to(target))
+                rel_path = normalize_rel_path(file_path.relative_to(target))
             except Exception:
                 # if file not under target for some reason, skip
                 continue

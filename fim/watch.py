@@ -9,9 +9,11 @@ Design principles:
 """
 from __future__ import annotations
 
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from watchdog.events import (
     FileCreatedEvent,
@@ -23,33 +25,127 @@ from watchdog.events import (
 from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
 
-from .comparator import compare_baseline
 from .hasher import hash_file
 from .logger import append_log
 from .scanner import _matches_exclude_patterns
+from .utils import normalize_rel_path
 
 
-def classify_change(rel_path: str, baseline_files: Dict[str, dict], new_meta: Optional[dict]) -> Optional[str]:
+ChangeType = str  # "created" | "modified" | "deleted"
+
+
+@dataclass(frozen=True)
+class CompareResult:
     """
-    Decide what changed for a single path by reusing comparator logic.
-    Returns one of: "created", "modified", "deleted", or None if no change.
-    
-    This is the single decision point: "Does this event violate the baseline?"
-    - Created → not in baseline
-    - Modified → hash mismatch with baseline
-    - Deleted → existed in baseline, now gone
-    """
-    old_subset = {rel_path: baseline_files[rel_path]} if rel_path in baseline_files else {}
-    new_subset = {rel_path: new_meta} if new_meta else {}
+    Output of single-file comparator.
 
-    diff = compare_baseline(old_subset, new_subset)
-    if diff["created"]:
-        return "created"
-    if diff["modified"]:
-        return "modified"
-    if diff["deleted"]:
-        return "deleted"
-    return None
+    - change_type: created/modified/deleted or None for no change
+    - meta: computed metadata (hash/size/mtime) when available
+    - unreadable: True when file couldn't be read/hashed; caller may retry once
+    """
+
+    change_type: Optional[ChangeType]
+    meta: Optional[dict] = None
+    unreadable: bool = False
+
+
+@dataclass(frozen=True)
+class NormalizedEvent:
+    """
+    Normalized event that watch mode processes.
+    MOVED is normalized to DELETE + CREATE elsewhere.
+    """
+
+    kind: str  # "created" | "modified" | "deleted"
+    abs_path: Path
+
+
+def normalize_event(kind: str, src_path: str, dest_path: Optional[str] = None) -> List[NormalizedEvent]:
+    """
+    Normalize noisy watchdog events into explicit security-relevant events.
+
+    Raw event -> normalized:
+    - moved -> deleted(src) + created(dest)
+    - created -> created
+    - modified -> modified
+    - deleted -> deleted
+    """
+    k = kind.lower().strip()
+    if k == "moved":
+        if dest_path is None:
+            return [NormalizedEvent(kind="deleted", abs_path=Path(src_path))]
+        return [
+            NormalizedEvent(kind="deleted", abs_path=Path(src_path)),
+            NormalizedEvent(kind="created", abs_path=Path(dest_path)),
+        ]
+    if k in ("created", "modified", "deleted"):
+        return [NormalizedEvent(kind=k, abs_path=Path(src_path))]
+    # unknown event -> ignore
+    return []
+
+
+def _build_file_meta(path: Path) -> Tuple[Optional[dict], bool]:
+    """
+    Build file metadata (hash, size, mtime).
+
+    Returns (meta, unreadable):
+    - meta is None when file missing or unreadable
+    - unreadable True means "exists but we couldn't read/hash it"
+    """
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None, False
+    except (PermissionError, OSError):
+        return None, True
+
+    file_hash = hash_file(path)
+    if file_hash is None:
+        return None, True
+
+    return {
+        "hash": file_hash,
+        "size": stat.st_size,
+        "mtime": int(stat.st_mtime),
+    }, False
+
+
+def compare_file(abs_path: Path, rel_path: str, baseline_entry: Optional[dict]) -> CompareResult:
+    """
+    Single-file comparator (MANDATORY core brain):
+
+    One path in -> one decision out.
+    - No scanning
+    - No logging
+    - Pure decision logic around baseline truth + current file state
+
+    Rules:
+    - Created  -> not in baseline, but exists now (readable)
+    - Modified -> in baseline, exists now, hash mismatch
+    - Deleted  -> in baseline, missing now
+    - None     -> matches baseline OR unreadable (caller may retry once)
+    """
+    meta, unreadable = _build_file_meta(abs_path)
+
+    # Missing file
+    if meta is None and not unreadable:
+        if baseline_entry is not None:
+            return CompareResult(change_type="deleted", meta=None, unreadable=False)
+        return CompareResult(change_type=None, meta=None, unreadable=False)
+
+    # Unreadable/half-written: do not claim modified; allow one retry
+    if meta is None and unreadable:
+        return CompareResult(change_type=None, meta=None, unreadable=True)
+
+    # Exists & readable at this point
+    if baseline_entry is None:
+        return CompareResult(change_type="created", meta=meta, unreadable=False)
+
+    baseline_hash = baseline_entry.get("hash")
+    if baseline_hash != meta.get("hash"):
+        return CompareResult(change_type="modified", meta=meta, unreadable=False)
+
+    return CompareResult(change_type=None, meta=meta, unreadable=False)
 
 
 class WatchHandler(FileSystemEventHandler):
@@ -64,48 +160,32 @@ class WatchHandler(FileSystemEventHandler):
         baseline_files: Dict[str, dict],
         exclude: Optional[List[str]],
         log_path: Optional[Path] = None,
+        debounce_ms: int = 600,
     ) -> None:
         self.target = target.resolve()
         self.baseline_files = baseline_files  # Read-only source of truth
         self.exclude = exclude or []
         self.log_path = log_path
 
+        # per-path debounce state (Windows is noisy)
+        self.debounce_seconds = max(0.0, debounce_ms / 1000.0)
+        self._lock = threading.Lock()
+        self._timers: Dict[str, threading.Timer] = {}
+        self._pending: Dict[str, Path] = {}  # rel_path -> last abs_path to evaluate
+        self._retry_once: Dict[str, bool] = {}  # rel_path -> whether we've retried already
+
     # ---- helpers ---------------------------------------------------------
     def _rel_path(self, absolute: str) -> Optional[str]:
         """Convert absolute path to relative path from target root."""
         try:
             rel = Path(absolute).resolve().relative_to(self.target)
-            return str(rel)
+            return normalize_rel_path(rel)
         except Exception:
             return None
 
     def _should_ignore(self, rel_path: str) -> bool:
         """Check if path matches exclude patterns."""
         return _matches_exclude_patterns(rel_path, self.exclude)
-
-    def _build_meta(self, path: Path) -> Optional[dict]:
-        """
-        Build file metadata (hash, size, mtime).
-        Returns None if file is unreadable, locked, or half-written.
-        This handles the "never trust filesystem events" principle:
-        file may exist but be half-written, so hash might fail.
-        """
-        try:
-            stat = path.stat()
-        except (FileNotFoundError, PermissionError, OSError):
-            # File disappeared, locked, or inaccessible - ignore this event
-            return None
-
-        file_hash = hash_file(path)
-        if file_hash is None:
-            # Hash failed (file might be half-written, locked, etc.) - ignore
-            return None
-
-        return {
-            "hash": file_hash,
-            "size": stat.st_size,
-            "mtime": int(stat.st_mtime),
-        }
 
     def _emit(self, kind: str, rel_path: str, meta: Optional[dict] = None) -> None:
         """
@@ -115,93 +195,108 @@ class WatchHandler(FileSystemEventHandler):
         """
         print(f"[{kind.upper()}] {rel_path}")
         if self.log_path:
-            # Log individual watch events using same event types as check
-            # Structure: single path per event (event-driven) vs check's batch format
+            # Same log "shape" as check (created/modified/deleted lists),
+            # but watch emits one decision at a time.
             append_log(
                 self.log_path,
                 {
                     "event": "watch",
                     "target": str(self.target),
+                    "created": [rel_path] if kind == "created" else [],
+                    "modified": [rel_path] if kind == "modified" else [],
+                    "deleted": [rel_path] if kind == "deleted" else [],
+                    # optional extra for watch consumers/services
                     "path": rel_path,
-                    "change_type": kind,  # "created", "modified", or "deleted"
                     "hash": meta.get("hash") if meta else None,
                 },
             )
 
-    def _evaluate_event(self, rel_path: str, abs_path: Optional[Path] = None, is_delete: bool = False) -> None:
+    # ---- debounce + evaluation ------------------------------------------
+    def _schedule_evaluation(self, rel_path: str, abs_path: Path) -> None:
         """
-        Core decision function: "Does this event violate the baseline?"
-        
-        One event = one decision. Stateless comparison against baseline.
-        Idempotent: same file state → same result (handles duplicate events).
+        Per-path debounce: always process the latest filesystem state.
+        If events arrive too quickly, delay processing until Windows finishes touching the file.
         """
-        # Filter: ignore paths outside target or matching exclude patterns
-        if rel_path is None or self._should_ignore(rel_path):
-            return
+        with self._lock:
+            self._pending[rel_path] = abs_path
+            # cancel existing timer for this path
+            t = self._timers.get(rel_path)
+            if t is not None:
+                t.cancel()
+            timer = threading.Timer(self.debounce_seconds, self._flush_one, args=(rel_path,))
+            timer.daemon = True
+            self._timers[rel_path] = timer
+            timer.start()
 
-        # Decision point: compare current state against baseline
-        if is_delete:
-            # File deleted: violates baseline if it existed in baseline
-            change = classify_change(rel_path, self.baseline_files, None)
-            if change:  # Only "deleted" is possible here
-                self._emit(change, rel_path)
-            return
+    def _flush_one(self, rel_path: str) -> None:
+        # Grab latest pending state
+        with self._lock:
+            abs_path = self._pending.get(rel_path)
+            # timer has fired; remove it
+            self._timers.pop(rel_path, None)
 
-        # File created or modified: need to hash it
         if abs_path is None:
             return
 
-        meta = self._build_meta(abs_path)
-        if meta is None:
-            # File unreadable/half-written - ignore this event (idempotent: will retry on next event)
+        # Evaluate latest filesystem state vs baseline
+        baseline_entry = self.baseline_files.get(rel_path)
+        result = compare_file(abs_path, rel_path, baseline_entry)
+
+        if result.unreadable:
+            # Retry once after debounce window (Day 10 rule)
+            do_retry = False
+            with self._lock:
+                already = self._retry_once.get(rel_path, False)
+                if not already:
+                    self._retry_once[rel_path] = True
+                    do_retry = True
+            if do_retry:
+                self._schedule_evaluation(rel_path, abs_path)
             return
 
-        # Decision: does current hash match baseline?
-        change = classify_change(rel_path, self.baseline_files, meta)
-        if change:
-            # Violation detected: created (not in baseline) or modified (hash mismatch)
-            self._emit(change, rel_path, meta)
-        # If change is None, file matches baseline - no violation, no output (idempotent)
+        # On successful read, clear retry flag for future noise
+        with self._lock:
+            self._retry_once.pop(rel_path, None)
+
+        if result.change_type:
+            self._emit(result.change_type, rel_path, result.meta)
 
     # ---- event processors ------------------------------------------------
     def on_created(self, event: FileCreatedEvent) -> None:
-        """Handle file creation event."""
         if event.is_directory:
             return
-        rel_path = self._rel_path(event.src_path)
-        self._evaluate_event(rel_path, Path(event.src_path), is_delete=False)
+        for ne in normalize_event("created", event.src_path):
+            rel_path = self._rel_path(str(ne.abs_path))
+            if rel_path is None or self._should_ignore(rel_path):
+                continue
+            self._schedule_evaluation(rel_path, ne.abs_path)
 
     def on_modified(self, event: FileModifiedEvent) -> None:
-        """
-        Handle file modification event.
-        Windows may fire this twice for the same change - idempotent handling
-        ensures same file state → same result.
-        """
         if event.is_directory:
             return
-        rel_path = self._rel_path(event.src_path)
-        self._evaluate_event(rel_path, Path(event.src_path), is_delete=False)
+        for ne in normalize_event("modified", event.src_path):
+            rel_path = self._rel_path(str(ne.abs_path))
+            if rel_path is None or self._should_ignore(rel_path):
+                continue
+            self._schedule_evaluation(rel_path, ne.abs_path)
 
     def on_deleted(self, event: FileDeletedEvent) -> None:
-        """Handle file deletion event."""
         if event.is_directory:
             return
-        rel_path = self._rel_path(event.src_path)
-        self._evaluate_event(rel_path, is_delete=True)
+        for ne in normalize_event("deleted", event.src_path):
+            rel_path = self._rel_path(str(ne.abs_path))
+            if rel_path is None or self._should_ignore(rel_path):
+                continue
+            self._schedule_evaluation(rel_path, ne.abs_path)
 
     def on_moved(self, event: FileMovedEvent) -> None:
-        """
-        Handle file move/rename event.
-        Treated as delete (src) + create (dest) for baseline comparison.
-        """
         if event.is_directory:
             return
-        # Source: deleted
-        rel_src = self._rel_path(event.src_path)
-        self._evaluate_event(rel_src, is_delete=True)
-        # Destination: created
-        rel_dest = self._rel_path(event.dest_path)
-        self._evaluate_event(rel_dest, Path(event.dest_path), is_delete=False)
+        for ne in normalize_event("moved", event.src_path, event.dest_path):
+            rel_path = self._rel_path(str(ne.abs_path))
+            if rel_path is None or self._should_ignore(rel_path):
+                continue
+            self._schedule_evaluation(rel_path, ne.abs_path)
 
 
 def _build_observer(use_polling: bool = False) -> Observer:

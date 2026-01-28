@@ -13,6 +13,7 @@ from .comparator import compare_baseline
 from .logger import append_log
 from .settings import build_settings
 from .watch import watch
+from .utils import normalize_rel_path
 
 
 def _flatten_exclude(exclude_arg: Any) -> List[str]:
@@ -88,12 +89,14 @@ def check_command(args: Any) -> None:
     if baseline is None:
         print(f"ERROR: Baseline not found at: {baseline_path}")
         return
+    baseline_files_raw = baseline.get("files", {})
+    baseline_files = {normalize_rel_path(k): v for k, v in baseline_files_raw.items()}
 
     print(f"Scanning current directory state: {target}")
     new_files = scan_directory(Path(target), exclude=exclude, follow_symlinks=follow_symlinks)
 
     print("Comparing with baseline...")
-    changes = compare_baseline(baseline.get("files", {}), new_files)
+    changes = compare_baseline(baseline_files, new_files)
 
     created = changes.get("created", [])
     deleted = changes.get("deleted", [])
@@ -148,11 +151,13 @@ def update_command(args: Any) -> None:
     if old_baseline is None:
         print(f"ERROR: Baseline not found at {baseline_path}. Run `fim init` first.")
         return
+    old_files_raw = old_baseline.get("files", {})
+    old_files = {normalize_rel_path(k): v for k, v in old_files_raw.items()}
 
     print(f"Scanning current directory state: {target}")
     new_files = scan_directory(Path(target), exclude=exclude, follow_symlinks=follow_symlinks)
 
-    changes = compare_baseline(old_baseline.get("files", {}), new_files)
+    changes = compare_baseline(old_files, new_files)
 
     created = changes.get("created", [])
     modified = changes.get("modified", [])
@@ -233,7 +238,8 @@ def watch_command(args: Any) -> None:
         print(f"ERROR: Baseline not found at: {baseline_path}. Run `fim init` first.")
         return
 
-    baseline_files = baseline.get("files", {})
+    baseline_files_raw = baseline.get("files", {})
+    baseline_files = {normalize_rel_path(k): v for k, v in baseline_files_raw.items()}
     print(f"Loaded baseline from {baseline_path} with {len(baseline_files)} files.")
     print(f"Log file: {log_path}")
 

@@ -1,4 +1,13 @@
-venv/ 
-__pycache__/ 
-*.pyc 
-*.jsonl 
+# Python cache / bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+.env/
+
+# Runtime artifacts
+baseline.json
+watch_test/
+*.jsonl
