@@ -13,7 +13,7 @@ from .comparator import compare_baseline
 from .logger import append_log
 from .settings import build_settings
 from .watch import watch
-from .utils import normalize_rel_path
+from .utils import default_watch_log_path, is_path_within, normalize_rel_path
 
 
 def _flatten_exclude(exclude_arg: Any) -> List[str]:
@@ -230,7 +230,21 @@ def watch_command(args: Any) -> None:
 
     target = Path(settings["target"]).resolve()
     baseline_path = Path(settings["baseline"])
-    log_path = Path(settings["log"])
+    # Design rule: watch mode must never write logs inside the watched tree.
+    # If user did not provide --log explicitly, choose a safe default outside.
+    if getattr(args, "log", None):
+        log_path = Path(args.log).expanduser()
+        if not log_path.is_absolute():
+            log_path = (Path.cwd() / log_path).resolve()
+        if is_path_within(log_path, target):
+            print("ERROR: Refusing to write watch log inside the watched directory.")
+            print(f"  watched: {target}")
+            print(f"  log:     {log_path}")
+            print("Choose a log path outside the watched tree (e.g. under %LOCALAPPDATA%\\fim\\logs).")
+            return
+    else:
+        log_path = default_watch_log_path(target)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
     exclude = settings.get("exclude", [])
 
     baseline = load_json(baseline_path)
