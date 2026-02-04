@@ -20,6 +20,7 @@ A Python-based **file integrity monitoring (FIM) tool** that creates baselines o
 - **Watch** ([fim/watch.py](fim/watch.py)): Event-driven handler using `watchdog` Observer; idempotent (same event twice → same outcome)
 - **CLI** ([fim/cli.py](fim/cli.py)): Entry point; commands: `init`, `check`, `watch`, `tail`
 - **Config** ([fim/config.py](fim/config.py)): YAML-based with priority: **Defaults ← YAML file ← CLI args**
+- **Service** ([fim/service.py](fim/service.py)): Windows Service wrapper; enables FIM to run as system service with install/start/stop/remove operations
 
 ### Data Structures
 
@@ -109,6 +110,7 @@ pytest -v      # Verbose output
 
 - **watchdog** ([fim/watch.py](fim/watch.py)): File system event monitoring; falls back to polling on some drives
 - **PyYAML** ([fim/config.py](fim/config.py)): Config parsing
+- **pywin32** ([fim/service.py](fim/service.py)): Windows service utilities (ServiceFramework, servicemanager)
 - **pytest**: Test runner (in `requirements.txt`)
 - **logging**: Standard library; initialized in `__main__.py` with ISO timestamps
 
@@ -138,4 +140,5 @@ pytest -v      # Verbose output
 | `fim/storage/json_store.py` | Baseline/log persistence |
 | `fim/logger.py` | JSONL change event append |
 | `fim/utils.py` | Path normalization & helpers |
+| `fim/service.py` | Windows Service wrapper (install/start/stop/remove) |
 | `tests/` | Unit tests for core modules |
