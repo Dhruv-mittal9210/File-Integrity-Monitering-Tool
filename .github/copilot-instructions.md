@@ -81,6 +81,12 @@ Watch is stateless and idempotent:
 - Default watch log path is outside the watched tree (`default_watch_log_path`).
 - If user-supplied `--log` is inside the watched tree, refuse and exit.
 
+### Windows Service Notes
+- `fim/service.py` must remain safe when started by SCM (no package context).
+- The service bootstraps the project root into `sys.path` before `fim.*` imports.
+- Service uses a supervisor thread to restart `watch()` if the watch thread dies.
+- Keep `fim/__init__.py` side-effect-free to avoid importing CLI/config (and PyYAML) in service context.
+
 ### Baseline Update Workflow
 - `update` compares current state vs baseline.
 - Creates backup `baseline.json.bak.<UTC timestamp>` before overwriting.
