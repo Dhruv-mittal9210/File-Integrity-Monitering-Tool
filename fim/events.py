@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class FileEvent:
     event_type: str  # CREATED | MODIFIED | DELETED
     path: str
