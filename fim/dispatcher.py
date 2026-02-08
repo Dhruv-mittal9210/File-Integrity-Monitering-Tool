@@ -3,6 +3,9 @@ from __future__ import annotations
 from fim.events import FileEvent
 
 
+_file_logger = None
+
+
 def dispatch_event(event: FileEvent) -> None:
     for handler in (_log_to_file, _log_to_event_viewer, _send_telegram_alert):
         try:
@@ -12,7 +15,26 @@ def dispatch_event(event: FileEvent) -> None:
 
 
 def _log_to_file(event: FileEvent) -> None:
-    pass
+    try:
+        from fim.logging_config import get_logger
+
+        global _file_logger
+        if _file_logger is None:
+            _file_logger = get_logger("fim.events")
+        logger = _file_logger
+        parts = [
+            f"Event type: {event.event_type}",
+            f"Path: {event.path}",
+            f"Timestamp: {event.timestamp}",
+        ]
+        if event.hash_before is not None:
+            parts.append(f"Hash before: {event.hash_before}")
+        if event.hash_after is not None:
+            parts.append(f"Hash after: {event.hash_after}")
+        message = " | ".join(parts)
+        logger.info(message)
+    except Exception:
+        pass
 
 
 def _log_to_event_viewer(event: FileEvent) -> None:
