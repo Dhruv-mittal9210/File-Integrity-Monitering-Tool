@@ -26,12 +26,11 @@ from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
 
 from .hasher import hash_file
-from .logger import append_log
 from .scanner import _matches_exclude_patterns
 from .utils import normalize_rel_path
 
 
-ChangeType = str  # "created" | "modified" | "deleted"
+ChangeType = str  # "CREATED" | "MODIFIED" | "DELETED"
 
 
 @dataclass(frozen=True)
@@ -187,29 +186,32 @@ class WatchHandler(FileSystemEventHandler):
         """Check if path matches exclude patterns."""
         return _matches_exclude_patterns(rel_path, self.exclude)
 
-    def _emit(self, kind: str, rel_path: str, meta: Optional[dict] = None) -> None:
+    def _emit(
+        self,
+        kind: str,
+        rel_path: str,
+        meta: Optional[dict] = None,
+        hash_before: Optional[str] = None,
+    ) -> None:
         """
-        Emit change event to console and log.
-        Uses same event types as check command: "created", "modified", "deleted"
-        Log format compatible with check: same event types, same structure.
+        Emit change event to dispatcher.
         """
-        print(f"[{kind.upper()}] {rel_path}")
-        if self.log_path:
-            # Same log "shape" as check (created/modified/deleted lists),
-            # but watch emits one decision at a time.
-            append_log(
-                self.log_path,
-                {
-                    "event": "watch",
-                    "target": str(self.target),
-                    "created": [rel_path] if kind == "created" else [],
-                    "modified": [rel_path] if kind == "modified" else [],
-                    "deleted": [rel_path] if kind == "deleted" else [],
-                    # optional extra for watch consumers/services
-                    "path": rel_path,
-                    "hash": meta.get("hash") if meta else None,
-                },
-            )
+        from datetime import datetime
+
+        from .dispatcher import dispatch_event
+        from .events import FileEvent
+
+        abs_path = str((self.target / rel_path).resolve())
+        hash_after = meta.get("hash") if meta else None
+
+        event = FileEvent(
+            event_type=kind.upper(),
+            path=abs_path,
+            hash_before=hash_before,
+            hash_after=hash_after,
+            timestamp=datetime.utcnow(),
+        )
+        dispatch_event(event)
 
     # ---- debounce + evaluation ------------------------------------------
     def _schedule_evaluation(self, rel_path: str, abs_path: Path) -> None:
@@ -259,7 +261,8 @@ class WatchHandler(FileSystemEventHandler):
             self._retry_once.pop(rel_path, None)
 
         if result.change_type:
-            self._emit(result.change_type, rel_path, result.meta)
+            hash_before = baseline_entry.get("hash") if baseline_entry else None
+            self._emit(result.change_type, rel_path, result.meta, hash_before)
 
     # ---- event processors ------------------------------------------------
     def on_created(self, event: FileCreatedEvent) -> None:
@@ -318,12 +321,11 @@ def watch(target: Path, baseline_files: Dict[str, dict], exclude: Optional[List[
     observer.schedule(handler, str(target), recursive=True)
     observer.start()
 
-    print(f"Watching {target.resolve()} for changes... (Ctrl+C to stop)")
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("Stopping watcher...")
+        pass
     finally:
         observer.stop()
         observer.join()
