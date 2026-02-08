@@ -132,7 +132,7 @@ class FIMService(win32serviceutil.ServiceFramework):
         Runs in a background thread.
         """
 
-        baseline_path = Path("baseline.json")
+        baseline_path = PROJECT_ROOT / "baseline.json"
         baseline = load_json(baseline_path)
 
         if baseline is None:
